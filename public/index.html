@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebRTC video call</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #172033; background: #f2f5fa; }
+    body { max-width: 70rem; margin: auto; padding: 1.5rem; }
+    h1 { margin-bottom: .3rem; }
+    p { color: #526179; }
+    .videos { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
+    figure { margin: 0; background: #172033; border-radius: .75rem; overflow: hidden; }
+    video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #111827; }
+    figcaption { color: white; padding: .7rem 1rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.25rem; }
+    button { padding: .75rem 1.2rem; border: 0; border-radius: .5rem; font: inherit; font-weight: 600; cursor: pointer; }
+    #join { background: #1d4ed8; color: white; }
+    #leave { background: #dbe3ee; color: #172033; }
+    button:disabled { opacity: .5; cursor: default; }
+    #status { min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <h1>Video call</h1>
+  <p>Two people can join this call. Allow camera and microphone access when prompted.</p>
+  <div class="videos">
+    <figure><video id="local" autoplay muted playsinline></video><figcaption>You</figcaption></figure>
+    <figure><video id="remote" autoplay playsinline></video><figcaption>Other participant</figcaption></figure>
+  </div>
+  <div class="controls">
+    <button id="join" type="button">Join call</button>
+    <button id="leave" type="button" disabled>Leave call</button>
+  </div>
+  <p id="status" role="status">Ready to join.</p>
+  <script>
+    const join = document.getElementById("join");
+    const leave = document.getElementById("leave");
+    const status = document.getElementById("status");
+    const localVideo = document.getElementById("local");
+    const remoteVideo = document.getElementById("remote");
+    const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+
+    let stream = null;
+    let socket = null;
+    let peer = null;
+    let candidates = [];
+    let messages = Promise.resolve();
+    let generation = 0;
+
+    function setStatus(message) { status.textContent = message; }
+
+    function closePeer() {
+      if (peer) peer.close();
+      peer = null;
+      candidates = [];
+      remoteVideo.srcObject = null;
+    }
+
+    function cleanup(message) {
+      generation++;
+      if (socket) {
+        socket.onclose = null;
+        socket.close();
+      }
+      socket = null;
+      closePeer();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      localVideo.srcObject = null;
+      join.disabled = false;
+      leave.disabled = true;
+      setStatus(message);
+    }
+
+    function send(data) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        throw new Error("Signaling connection is not open.");
+      }
+      socket.send(JSON.stringify(data));
+    }
+
+    function createPeer() {
+      closePeer();
+      const current = new RTCPeerConnection({ iceServers });
+      peer = current;
+      stream.getTracks().forEach(track => current.addTrack(track, stream));
+      current.onicecandidate = event => {
+        if (peer === current && event.candidate && socket && socket.readyState === WebSocket.OPEN) {
+          send({ type: "candidate", candidate: event.candidate });
+        }
+      };
+      current.ontrack = event => {
+        if (peer === current && event.streams[0]) remoteVideo.srcObject = event.streams[0];
+      };
+      current.onconnectionstatechange = () => {
+        if (peer !== current) return;
+        if (current.connectionState === "connected") setStatus("Connected.");
+        if (current.connectionState === "failed") setStatus("Connection failed. Leave and try again; a TURN server may be required.");
+        if (current.connectionState === "disconnected") setStatus("Connection interrupted.");
+      };
+      return current;
+    }
+
+    async function handleMessage(text, myGeneration) {
+      if (myGeneration !== generation) return;
+      if (text === "waiting") {
+        setStatus("Waiting for another participant...");
+        return;
+      }
+      if (text === "ready") {
+        setStatus("Participant joined. Connecting...");
+        return;
+      }
+      if (text === "full" || text === "invalid-path") {
+        cleanup(text === "full" ? "The call already has two participants." : "Invalid signaling endpoint.");
+        return;
+      }
+      if (text === "peer-left") {
+        closePeer();
+        setStatus("Participant left. Waiting for someone to join...");
+        return;
+      }
+      if (text === "offer") {
+        const current = createPeer();
+        setStatus("Participant joined. Connecting...");
+        const offer = await current.createOffer();
+        if (myGeneration !== generation || peer !== current) return;
+        await current.setLocalDescription(offer);
+        if (myGeneration === generation && peer === current) send({ type: "offer", description: current.localDescription });
+        return;
+      }
+      const message = JSON.parse(text);
+      if (message.type === "offer") {
+        const pending = candidates;
+        const current = createPeer();
+        candidates = pending;
+        await current.setRemoteDescription(message.description);
+        if (myGeneration !== generation || peer !== current) return;
+        for (const candidate of candidates) await current.addIceCandidate(candidate);
+        candidates = [];
+        const answer = await current.createAnswer();
+        await current.setLocalDescription(answer);
+        if (myGeneration === generation && peer === current) send({ type: "answer", description: current.localDescription });
+      } else if (message.type === "answer" && peer) {
+        const current = peer;
+        await current.setRemoteDescription(message.description);
+        if (myGeneration !== generation || peer !== current) return;
+        for (const candidate of candidates) await current.addIceCandidate(candidate);
+        candidates = [];
+      } else if (message.type === "candidate") {
+        if (peer && peer.remoteDescription) await peer.addIceCandidate(message.candidate);
+        else candidates.push(message.candidate);
+      }
+    }
+
+    join.addEventListener("click", async () => {
+      join.disabled = true;
+      leave.disabled = false;
+      const myGeneration = ++generation;
+      setStatus("Requesting camera and microphone...");
+      try {
+        const acquired = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        if (myGeneration !== generation) {
+          acquired.getTracks().forEach(track => track.stop());
+          return;
+        }
+        stream = acquired;
+        localVideo.srcObject = stream;
+        socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/signal`);
+        socket.onopen = () => setStatus("Connected to signaling server...");
+        socket.onmessage = event => {
+          messages = messages.then(() => handleMessage(event.data, myGeneration)).catch(error => {
+            console.error("WebRTC signaling error:", error);
+            if (myGeneration === generation) cleanup("Signaling failed. Leave and try again.");
+          });
+        };
+        socket.onerror = () => setStatus("Could not connect to the signaling server.");
+        socket.onclose = () => {
+          if (myGeneration === generation) cleanup("Signaling disconnected. Please join again.");
+        };
+      } catch (error) {
+        console.error("Could not start call:", error);
+        if (myGeneration === generation) cleanup("Could not access camera or microphone, or start signaling.");
+      }
+    });
+
+    leave.addEventListener("click", () => cleanup("You left the call."));
+    window.addEventListener("beforeunload", () => cleanup("Call ended."));
+  </script>
+</body>
+</html>
