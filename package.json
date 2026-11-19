@@ -1,0 +1,13 @@
+{
+ "name": "webRTC",
+ "version": "1.0.0",
+ "description": "webRTC Basics",
+ "main": "app.bzg",
+ "scripts": {
+ "start": "bonezegei app.bzg"
+ },
+ "dependencies": {
+ "http": "^1.0.0",
+ },
+ "license": "MIT"
+}
