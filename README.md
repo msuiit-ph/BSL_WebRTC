@@ -7,4 +7,7 @@ bzg install
 
 # run the app
 bzg run
+
+# open
+https://localhost 
 ```
