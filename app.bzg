@@ -55,9 +55,9 @@ server.onDisconnect = function (clientId) {
     }
 };
 
-if (server.enableTLS("cert.pem", "key.pem") == -1) {
+if (server.enableTLS("cert/cert.pem", "cert/key.pem") == -1) {
     print("TLS setup failed; the WebRTC server was not started.");
 } else {
-    print("WebRTC example listening on https://localhost:8444/");
+    print("WebRTC example listening on https://localhost");
     server.run();
 }
