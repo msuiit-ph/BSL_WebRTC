@@ -1,0 +1,63 @@
+include("lib/http.bzg");
+
+var server = http(443);
+var peer1 = -1;
+var peer2 = -1;
+
+server.get = function (path, request) {
+    if (path == "/") {
+        server.addHeader("Cache-Control: no-store");
+        server.sendFile("webrtc.html");
+    } else {
+        server.sendResponse("Not found", "text/plain", 404);
+    }
+};
+
+server.onConnect = function (clientId, path) {
+    if (path != "/signal") {
+        server.send(clientId, "invalid-path");
+    } else if (peer1 == -1) {
+        peer1 = clientId;
+        if (peer2 == -1) {
+            server.send(peer1, "waiting");
+        } else {
+            server.send(peer1, "ready");
+            server.send(peer2, "offer");
+        }
+    } else if (peer2 == -1) {
+        peer2 = clientId;
+        server.send(peer2, "ready");
+        server.send(peer1, "offer");
+    } else {
+        server.send(clientId, "full");
+    }
+};
+
+server.onData = function (message, clientId) {
+    if (clientId == peer1 && peer2 != -1) {
+        server.send(peer2, message);
+    } else if (clientId == peer2 && peer1 != -1) {
+        server.send(peer1, message);
+    }
+};
+
+server.onDisconnect = function (clientId) {
+    if (clientId == peer1) {
+        peer1 = -1;
+        if (peer2 != -1) {
+            server.send(peer2, "peer-left");
+        }
+    } else if (clientId == peer2) {
+        peer2 = -1;
+        if (peer1 != -1) {
+            server.send(peer1, "peer-left");
+        }
+    }
+};
+
+if (server.enableTLS("cert.pem", "key.pem") == -1) {
+    print("TLS setup failed; the WebRTC server was not started.");
+} else {
+    print("WebRTC example listening on https://localhost:8444/");
+    server.run();
+}
